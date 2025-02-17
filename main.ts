@@ -121,13 +121,13 @@ export default class WikiJSPublisher extends Plugin {
 		await this.loadSettings();
 		this.logger = new Logger(this.settings.debugMode);
 
-		// Add ribbon icon for single page publish
+		// Add ribbon icon at the bottom
 		this.addRibbonIcon(
 			'upload', 
 			'Publish to Wiki.js', 
 			async (evt: MouseEvent) => {
 				await this.publishCurrentNote();
-			}
+			},
 		);
 
 		// Add command to publish current note

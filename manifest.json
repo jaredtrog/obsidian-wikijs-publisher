@@ -1,7 +1,7 @@
 {
 	"id": "wikijs-publisher",
 	"name": "Wiki.js Publisher",
-	"version": "0.0.1",
+	"version": "0.0.2",
 	"minAppVersion": "0.15.0",
 	"description": "Publish your Obsidian notes to Wiki.js with support for tags, custom paths, and secure API authentication",
 	"author": "Jared Trog",
