@@ -1,4 +1,4 @@
-import { App, Editor, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting, TFile } from 'obsidian';
+import { App, MarkdownView, Notice, Plugin, PluginSettingTab, Setting, TFile } from 'obsidian';
 import * as https from 'https';
 import * as fs from 'fs';
 
@@ -39,18 +39,6 @@ interface WikiPage {
 	path: string;
 	/** Display title of the page */
 	title: string;
-}
-
-/**
- * Tag cache interface
- */
-interface TagCache {
-	/** Front matter tags */
-	frontmatterTags: string[];
-	/** Inline tags */
-	inlineTags: string[];
-	/** All tags combined */
-	allTags: string[];
 }
 
 /**
@@ -121,7 +109,6 @@ export default class WikiJSPublisher extends Plugin {
 	/** Plugin settings */
 	settings: WikiJSPublisherSettings;
 	logger: Logger;
-	private lastKnownTags: Map<string, TagCache> = new Map();
 
 	/**
 	 * Plugin load handler
@@ -132,11 +119,11 @@ export default class WikiJSPublisher extends Plugin {
 		this.logger = new Logger(this.settings.debugMode);
 
 		// Add ribbon icon for single page publish
-		const ribbonIconEl = this.addRibbonIcon(
+		this.addRibbonIcon(
 			'upload', 
 			'Publish to Wiki.js', 
-			(evt: MouseEvent) => {
-				this.publishCurrentNote();
+			async (evt: MouseEvent) => {
+				await this.publishCurrentNote();
 			}
 		);
 
@@ -144,34 +131,20 @@ export default class WikiJSPublisher extends Plugin {
 		this.addCommand({
 			id: 'publish-current-note',
 			name: 'Publish current note',
-			callback: () => this.publishCurrentNote()
+			callback: async () => await this.publishCurrentNote()
 		});
 
 		// Add command to publish all marked notes
 		this.addCommand({
 			id: 'publish-all-marked-notes',
 			name: 'Publish all marked notes',
-			callback: () => this.publishAllMarkedNotes()
+			callback: async () => await this.publishAllMarkedNotes()
 		});
 
 		// Add settings tab
 		this.addSettingTab(new WikiJSPublisherSettingTab(this.app, this));
 
-		// Register tag watcher
-		this.registerEvent(
-			this.app.metadataCache.on('changed', (file) => {
-				const oldTags = this.lastKnownTags.get(file.path);
-				const newTags = this.getTags(file);
-				
-				if (JSON.stringify(oldTags) !== JSON.stringify(newTags)) {
-					this.logger.debug(`Tags changed in ${file.path}`, {
-						old: oldTags,
-						new: newTags
-					});
-					this.lastKnownTags.set(file.path, newTags);
-				}
-			})
-		);
+		this.logger.debug('Wiki.js Publisher plugin loaded');
 	}
 
 	/**
@@ -224,14 +197,14 @@ export default class WikiJSPublisher extends Plugin {
 	 * @returns Promise resolving to response data
 	 * @throws Error on request failure
 	 */
-	async customFetch(url: string, options: any = {}): Promise<any> {
+	async customFetch(url: string, options: RequestOptions = {}): Promise<Response> {
 		this.logger.debug("Starting custom fetch");
 		const apiToken = this.getApiToken();
 		if (!apiToken) {
 			throw new Error('API token not configured or cannot be decrypted');
 		}
 
-		return new Promise((resolve, reject) => {
+		try {
 			const urlObj = new URL(url);
 			
 			const httpsOptions: https.RequestOptions = {
@@ -250,107 +223,100 @@ export default class WikiJSPublisher extends Plugin {
 			if (this.settings.caPath) {
 				try {
 					this.logger.debug(`Loading CA from ${this.settings.caPath}`);
-					const ca = fs.readFileSync(this.settings.caPath);
+					const ca = await fs.promises.readFile(this.settings.caPath);
 					httpsOptions.ca = ca;
 					this.logger.debug("CA certificate loaded successfully");
 				} catch (error) {
 					this.logger.error("Error loading CA certificate:", error);
-					reject(new Error(`Failed to load CA certificate: ${error.message}`));
-					return;
+					throw new Error(`Failed to load CA certificate: ${error.message}`);
 				}
 			}
 
-			const req = https.request(httpsOptions, (res) => {
-				let data = '';
+			const response = await new Promise<Response>((resolve, reject) => {
+				const req = https.request(httpsOptions, (res) => {
+					let data = '';
 
-				res.on('data', (chunk) => {
-					data += chunk;
-				});
+					res.on('data', (chunk) => {
+						data += chunk;
+					});
 
-				res.on('end', () => {
-					this.logger.debug(`Response status: ${res.statusCode}`);
-					
-					if (res.statusCode >= 200 && res.statusCode < 300) {
-						try {
-							const jsonData = data ? JSON.parse(data) : {};
-							resolve({
-								ok: true,
-								status: res.statusCode,
-								json: () => Promise.resolve(jsonData),
-								text: () => Promise.resolve(data)
-							});
-						} catch (e) {
-							this.logger.error("JSON parse error:", e);
-							reject(new Error('Invalid JSON response'));
+					res.on('end', () => {
+						this.logger.debug(`Response status: ${res.statusCode}`);
+						
+						if (res.statusCode >= 200 && res.statusCode < 300) {
+							try {
+								const jsonData = data ? JSON.parse(data) : {};
+								resolve({
+									ok: true,
+									status: res.statusCode,
+									json: async () => jsonData,
+									text: async () => data
+								});
+							} catch (e) {
+								this.logger.error("JSON parse error:", e);
+								reject(new Error('Invalid JSON response'));
+							}
+						} else {
+							reject(new Error(`HTTP Error: ${res.statusCode} ${data}`));
 						}
-					} else {
-						reject(new Error(`HTTP Error: ${res.statusCode} ${data}`));
-					}
+					});
 				});
+
+				req.on('error', (error) => {
+					this.logger.error("Request error:", error);
+					reject(error);
+				});
+
+				if (options.body) {
+					req.write(options.body);
+				}
+
+				req.end();
 			});
 
-			req.on('error', (error) => {
-				this.logger.error("Request error:", error);
-				reject(error);
-			});
-
-			if (options.body) {
-				req.write(options.body);
-			}
-
-			req.end();
-		});
+			return response;
+		} catch (error) {
+			this.logger.error("Fetch error:", error);
+			throw error;
+		}
 	}
 
 	/**
 	 * Publishes the currently active note to Wiki.js
-	 * Handles content processing and publishing workflow
 	 */
-	async publishCurrentNote() {
-		this.logger.debug('Starting publish process...');
-		const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
-		if (!activeView) {
-			this.logger.debug('No active markdown view found');
-			new Notice('No active markdown view');
-			return;
-		}
-
-		const editor = activeView.editor;
-		const file = activeView.file;
-
-		if (!file) {
-			this.logger.debug('No file is currently open');
-			new Notice('No file is currently open');
-			return;
-		}
-
-		if (!this.validateSettings()) {
-			return;
-		}
-
-		this.logger.debug(`Processing file: ${file.basename}`);
-
+	async publishCurrentNote(): Promise<void> {
 		try {
-			const name = file.basename;
+			this.logger.debug('Starting publish process...');
+			const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
+			if (!activeView) {
+				throw new Error('No active markdown view');
+			}
+
+			const editor = activeView.editor;
+			const file = activeView.file;
+
+			if (!file) {
+				throw new Error('No file is currently open');
+			}
+
+			if (!this.validateSettings()) {
+				return;
+			}
+
+			this.logger.debug(`Processing file: ${file.basename}`);
+
 			const rawContent = editor.getValue();
 			const frontMatter = this.getFrontMatter(rawContent);
 			
-			// Check if note should be published using key from settings
 			if (!this.shouldPublish(frontMatter)) {
-				this.logger.info(`File ${file.basename} is not marked for publishing`);
-				new Notice(`This note is not marked for publishing. Add ${this.settings.publishFrontMatterKey}: true to the front matter.`);
-				return;
+				throw new Error(`This note is not marked for publishing. Add ${this.settings.publishFrontMatterKey}: true to the front matter.`);
 			}
 
-			// Check for empty content after removing frontmatter
 			const processedContent = this.removeFrontMatter(rawContent);
 			if (!processedContent.trim()) {
-				this.logger.info('Cannot publish empty note');
-				new Notice('Cannot publish empty note. Please add some content first.');
-				return;
+				throw new Error('Cannot publish empty note. Please add some content first.');
 			}
 			
-			// Convert links
 			const content = await this.convertObsidianLinks(processedContent);
 			const tags = this.getPublishTags(file);
 			
@@ -358,135 +324,113 @@ export default class WikiJSPublisher extends Plugin {
 				frontMatter[this.settings.pathPrefixKey].replace(/^\/|\/$/g, '') + '/' : 
 				'';
 			
-			const slugifiedPath = pathPrefix + this.slugify(name);
+			const slugifiedPath = pathPrefix + this.slugify(file.basename);
 			this.logger.debug('Using path with prefix:', slugifiedPath);
 			
-			this.logger.debug('Publishing with tags:', tags);
-
-			const {exists, id, path} = await this.checkPageExists(slugifiedPath);
-			this.logger.debug(`Page exists: ${exists}, id: ${id}, path: ${path}`);
+			const {exists, id} = await this.checkPageExists(slugifiedPath);
 			
 			if (exists && id) {
 				this.logger.info('Updating existing Wiki.js page...');
-				await this.updateWikiJSPage(name, slugifiedPath, content, tags, id);
+				await this.updateWikiJSPage(file.basename, slugifiedPath, content, tags, id);
 				new Notice('Successfully updated page on Wiki.js');
 			} else {
 				this.logger.info('Creating new Wiki.js page...');
-				await this.createWikiJSPage(name, slugifiedPath, content, tags);
+				await this.createWikiJSPage(file.basename, slugifiedPath, content, tags);
 				new Notice('Successfully created new page on Wiki.js');
 			}
 		} catch (error) {
-			await this.cleanup();
-			this.logger.error('Publishing error:', error);
-			new Notice(`Failed to publish: ${error.message}`);
+			await this.handleError(error);
 		}
 	}
 
 	/**
 	 * Publishes all notes marked with the publish frontmatter key
-	 * Handles bulk publishing workflow with progress tracking
 	 */
-	async publishAllMarkedNotes() {
-		this.logger.info('Starting bulk publish process...');
-		
-		if (!this.validateSettings()) {
-			return;
-		}
-
-		const markdownFiles = this.app.vault.getMarkdownFiles();
-		const publishQueue: string[] = [];
-		let publishedCount = 0;
-		let errorCount = 0;
-
-		// First, scan all files to find those marked for publishing
-		for (const file of markdownFiles) {
-			try {
-				const content = await this.app.vault.read(file);
-				const frontMatter = this.getFrontMatter(content);
-				
-				if (this.shouldPublish(frontMatter)) {
-					publishQueue.push(file.path);
-				}
-			} catch (error) {
-				this.logger.error(`Error reading file ${file.path}:`, error);
-				errorCount++;
+	async publishAllMarkedNotes(): Promise<void> {
+		try {
+			this.logger.info('Starting bulk publish process...');
+			
+			if (!this.validateSettings()) {
+				return;
 			}
-		}
 
-		if (publishQueue.length === 0) {
-			this.logger.info('No files marked for publishing found');
-			new Notice('No files marked for publishing found');
-			return;
-		}
+			const markdownFiles = this.app.vault.getMarkdownFiles();
+			const publishQueue: string[] = [];
+			let publishedCount = 0;
+			let errorCount = 0;
 
-		new Notice(`Starting bulk publish: ${publishQueue.length} files found`);
-
-		// Process files one by one
-		for (const filePath of publishQueue) {
-			try {
-				const file = this.app.vault.getAbstractFileByPath(filePath);
-				if (!(file instanceof TFile)) {
-					this.logger.error(`Invalid file type for ${filePath}`);
+			// Build publish queue
+			for (const file of markdownFiles) {
+				try {
+					const content = await this.app.vault.read(file);
+					const frontMatter = this.getFrontMatter(content);
+					
+					if (this.shouldPublish(frontMatter)) {
+						publishQueue.push(file.path);
+					}
+				} catch (error) {
+					await this.handleError(error, `Error reading file ${file.path}`);
 					errorCount++;
-					continue;
 				}
-
-				const content = await this.app.vault.read(file);
-				if (!content) {
-					this.logger.error(`Could not read content for ${filePath}`);
-					errorCount++;
-					continue;
-				}
-
-				const frontMatter = this.getFrontMatter(content);
-				
-				// Check for empty content after removing frontmatter
-				const processedContent = this.removeFrontMatter(content);
-				if (!processedContent.trim()) {
-					this.logger.debug(`Skipping empty file: ${file.basename}`);
-					errorCount++;
-					continue;
-				}
-
-				// Get tags using new tag handling system
-				const tags = this.getPublishTags(file);
-				this.logger.debug(`Publishing ${file.basename} with tags:`, tags);
-				
-				const pathPrefix = frontMatter[this.settings.pathPrefixKey] ? 
-					frontMatter[this.settings.pathPrefixKey].replace(/^\/|\/$/g, '') + '/' : 
-					'';
-				
-				const slugifiedPath = pathPrefix + this.slugify(file.basename);
-				
-				this.logger.debug(`Publishing to path: ${slugifiedPath}`);
-				const {exists, id} = await this.checkPageExists(slugifiedPath);
-				
-				if (exists && id) {
-					this.logger.info(`Updating existing page: ${slugifiedPath}`);
-					await this.updateWikiJSPage(file.basename, slugifiedPath, processedContent, tags, id);
-				} else {
-					this.logger.info(`Creating new page: ${slugifiedPath}`);
-					await this.createWikiJSPage(file.basename, slugifiedPath, processedContent, tags);
-				}
-				
-				publishedCount++;
-				new Notice(`Published ${publishedCount}/${publishQueue.length}: ${file.basename} (${errorCount} errors)`, 3000);
-				
-				// Add a small delay between publishes to avoid overwhelming the API
-				await new Promise(resolve => setTimeout(resolve, 500));
-				
-			} catch (error) {
-				await this.cleanup();
-				this.logger.error(`Error publishing ${filePath}:`, error);
-				new Notice(`Failed to publish ${filePath}: ${error.message}`);
-				errorCount++;
 			}
-		}
 
-		if (errorCount > 0) {
-			new Notice(`Publishing complete. ${publishedCount} files published. ${errorCount} files failed. Check console for details.`, 10000);
-		} else {
+			if (publishQueue.length === 0) {
+				throw new Error('No files marked for publishing found');
+			}
+
+			new Notice(`Starting bulk publish: ${publishQueue.length} files found`);
+
+			// Process files
+			for (const filePath of publishQueue) {
+				try {
+					const file = this.app.vault.getAbstractFileByPath(filePath);
+					if (!(file instanceof TFile)) {
+						throw new Error(`Invalid file type for ${filePath}`);
+					}
+
+					const content = await this.app.vault.read(file);
+					const frontMatter = this.getFrontMatter(content);
+					const processedContent = this.removeFrontMatter(content);
+					
+					if (!processedContent.trim()) {
+						this.logger.debug(`Skipping empty file: ${file.basename}`);
+						errorCount++;
+						continue;
+					}
+
+					const convertedContent = await this.convertObsidianLinks(processedContent);
+					const tags = this.getPublishTags(file);
+					const pathPrefix = frontMatter[this.settings.pathPrefixKey] ? 
+						frontMatter[this.settings.pathPrefixKey].replace(/^\/|\/$/g, '') + '/' : 
+						'';
+					
+					const slugifiedPath = pathPrefix + this.slugify(file.basename);
+					const {exists, id} = await this.checkPageExists(slugifiedPath);
+					
+					if (exists && id) {
+						await this.updateWikiJSPage(file.basename, slugifiedPath, convertedContent, tags, id);
+					} else {
+						await this.createWikiJSPage(file.basename, slugifiedPath, convertedContent, tags);
+					}
+					
+					publishedCount++;
+					new Notice(`Published ${publishedCount}/${publishQueue.length}: ${file.basename} (${errorCount} errors)`, 3000);
+					
+					await new Promise(resolve => setTimeout(resolve, 500));
+					
+				} catch (error) {
+					await this.handleError(error, `Error publishing ${filePath}`);
+					errorCount++;
+				}
+			}
+
+			if (errorCount > 0) {
+				throw new Error(`Publishing complete. ${publishedCount} files published. ${errorCount} files failed. Check console for details.`);
+			}
+			
 			new Notice(`Successfully published ${publishedCount} files!`, 5000);
+		} catch (error) {
+			await this.handleError(error);
 		}
 	}
 
@@ -719,9 +663,9 @@ export default class WikiJSPublisher extends Plugin {
 	}
 
 	/**
-	 * Gets tags from front matter and combines with default tags
-	 * @param frontMatter Parsed front matter object
-	 * @returns Array of combined tags
+	 * Gets tags for publishing
+	 * @param file The file to get tags from
+	 * @returns Array of tags for publishing
 	 */
 	getPublishTags(file: TFile): string[] {
 		this.logger.debug('Getting tags for publishing');
@@ -731,8 +675,15 @@ export default class WikiJSPublisher extends Plugin {
 		
 		// Add document tags if sync is enabled
 		if (this.settings.syncTags) {
-			const {allTags} = this.getTags(file);
-			tags.push(...allTags);
+			const fileTags = this.app.metadataCache.getFileCache(file)?.tags || [];
+			const frontmatterTags = this.app.metadataCache.getFileCache(file)?.frontmatter?.tags || [];
+			
+			// Combine and process tags
+			const documentTags = [...fileTags, ...frontmatterTags]
+				.map(tag => typeof tag === 'string' ? tag : tag.tag)
+				.map(tag => tag.replace(/^#/, ''));
+			
+			tags.push(...documentTags);
 		}
 		
 		// Remove duplicates and empty tags
@@ -744,63 +695,65 @@ export default class WikiJSPublisher extends Plugin {
 	 * @param name Page title
 	 * @param path Page path
 	 * @param content Page content
-	 * @param tags Page tags
+	 * @param tags Array of tags
 	 * @throws Error if page creation fails
 	 */
-	async createWikiJSPage(name: string, path: string, content: string, tags: string[]) {
-		this.logger.debug(`Creating new page: ${name} at path: ${path}`);
-		const response = await this.customFetch(`${this.settings.wikiJsUrl}/graphql`, {
-			method: 'POST',
-			headers: {
-				'Authorization': `Bearer ${this.getApiToken()}`,
-				'Content-Type': 'application/json',
-			},
-			body: JSON.stringify({
-				query: `mutation ($content: String!, $description: String!, $editor: String!, $isPublished: Boolean!, $isPrivate: Boolean!, $locale: String!, $path: String!, $tags: [String]!, $title: String!) {
-					pages {
-						create(
-							content: $content,
-							description: $description,
-							editor: $editor,
-							isPublished: $isPublished,
-							isPrivate: $isPrivate,
-							locale: $locale,
-							path: $path,
-							tags: $tags,
-							title: $title
-						) {
-							responseResult {
-								succeeded
-								errorCode
-								message
+	async createWikiJSPage(name: string, path: string, content: string, tags: string[]): Promise<void> {
+		try {
+			this.logger.debug(`Creating new page: ${name} at path: ${path}`);
+			const response = await this.customFetch(`${this.settings.wikiJsUrl}/graphql`, {
+				method: 'POST',
+				headers: {
+					'Content-Type': 'application/json',
+				},
+				body: JSON.stringify({
+					query: `mutation ($content: String!, $description: String!, $editor: String!, $isPublished: Boolean!, $isPrivate: Boolean!, $locale: String!, $path: String!, $tags: [String]!, $title: String!) {
+						pages {
+							create(
+								content: $content,
+								description: $description,
+								editor: $editor,
+								isPublished: $isPublished,
+								isPrivate: $isPrivate,
+								locale: $locale,
+								path: $path,
+								tags: $tags,
+								title: $title
+							) {
+								responseResult {
+									succeeded
+									errorCode
+									message
+								}
 							}
 						}
+					}`,
+					variables: {
+						content,
+						description: name,
+						editor: 'markdown',
+						isPublished: true,
+						isPrivate: false,
+						locale: 'en',
+						path,
+						tags,
+						title: name
 					}
-				}`,
-				variables: {
-					content: content,
-					description: name,
-					editor: 'markdown',
-					isPublished: true,
-					isPrivate: false,
-					locale: 'en',
-					path: path,
-					tags: tags,
-					title: name
-				}
-			})
-		});
+				})
+			});
 
-		const data = await response.json();
-		
-		if (!data?.data?.pages?.create?.responseResult?.succeeded) {
-			const error = data?.data?.pages?.create?.responseResult?.message || 
-						 data?.errors?.[0]?.message || 
-						 'Unknown error creating page';
-			throw new Error(`Failed to create page: ${error}`);
+			const data = await response.json();
+			
+			if (!data?.data?.pages?.create?.responseResult?.succeeded) {
+				const error = data?.data?.pages?.create?.responseResult?.message || 
+							 data?.errors?.[0]?.message || 
+							 'Unknown error creating page';
+				throw new Error(`Failed to create page: ${error}`);
+			}
+		} catch (error) {
+			this.logger.error('Error creating page:', error);
+			throw error;
 		}
-
-		return data.data.pages.create;
 	}
 
 	/**
@@ -808,67 +761,68 @@ export default class WikiJSPublisher extends Plugin {
 	 * @param name Page title
 	 * @param path Page path
 	 * @param content Page content
-	 * @param tags Page tags
+	 * @param tags Array of tags
 	 * @param id Page ID
 	 * @throws Error if page update fails
 	 */
-	async updateWikiJSPage(name: string, path: string, content: string, tags: string[], id: number) {
-		this.logger.debug(`Updating page: ${name} at path: ${path} with id: ${id}`);
-
-		const response = await this.customFetch(`${this.settings.wikiJsUrl}/graphql`, {
-			method: 'POST',
-			headers: {
-				'Authorization': `Bearer ${this.getApiToken()}`,
-				'Content-Type': 'application/json',
-			},
-			body: JSON.stringify({
-				query: `mutation ($id: Int!, $content: String!, $description: String!, $editor: String!, $isPublished: Boolean!, $isPrivate: Boolean!, $locale: String!, $path: String!, $tags: [String]!, $title: String!) {
-					pages {
-						update(
-							id: $id,
-							content: $content,
-							description: $description,
-							editor: $editor,
-							isPublished: $isPublished,
-							isPrivate: $isPrivate,
-							locale: $locale,
-							path: $path,
-							tags: $tags,
-							title: $title
-						) {
-							responseResult {
-								succeeded
-								errorCode
-								message
+	async updateWikiJSPage(name: string, path: string, content: string, tags: string[], id: number): Promise<void> {
+		try {
+			this.logger.debug(`Updating page: ${name} at path: ${path}`);
+			const response = await this.customFetch(`${this.settings.wikiJsUrl}/graphql`, {
+				method: 'POST',
+				headers: {
+					'Content-Type': 'application/json',
+				},
+				body: JSON.stringify({
+					query: `mutation ($id: Int!, $content: String!, $description: String!, $editor: String!, $isPublished: Boolean!, $isPrivate: Boolean!, $locale: String!, $path: String!, $tags: [String]!, $title: String!) {
+						pages {
+							update(
+								id: $id,
+								content: $content,
+								description: $description,
+								editor: $editor,
+								isPublished: $isPublished,
+								isPrivate: $isPrivate,
+								locale: $locale,
+								path: $path,
+								tags: $tags,
+								title: $title
+							) {
+								responseResult {
+									succeeded
+									errorCode
+									message
+								}
 							}
 						}
+					}`,
+					variables: {
+						id,
+						content,
+						description: name,
+						editor: 'markdown',
+						isPublished: true,
+						isPrivate: false,
+						locale: 'en',
+						path,
+						tags,
+						title: name
 					}
-				}`,
-				variables: {
-					id: id,
-					content: content,
-					description: name,
-					editor: 'markdown',
-					isPublished: true,
-					isPrivate: false,
-					locale: 'en',
-					path: path,
-					tags: tags,
-					title: name
-				}
-			})
-		});
+				})
+			});
 
-		const data = await response.json();
-		
-		if (!data?.data?.pages?.update?.responseResult?.succeeded) {
-			const error = data?.data?.pages?.update?.responseResult?.message || 
-						 data?.errors?.[0]?.message || 
-						 'Unknown error updating page';
-			throw new Error(`Failed to update page: ${error}`);
+			const data = await response.json();
+			
+			if (!data?.data?.pages?.update?.responseResult?.succeeded) {
+				const error = data?.data?.pages?.update?.responseResult?.message || 
+							 data?.errors?.[0]?.message || 
+							 'Unknown error updating page';
+				throw new Error(`Failed to update page: ${error}`);
+			}
+		} catch (error) {
+			this.logger.error('Error updating page:', error);
+			throw error;
 		}
-
-		return data.data.pages.update;
 	}
 
 	/**
@@ -920,57 +874,34 @@ export default class WikiJSPublisher extends Plugin {
 		}
 	}
 
-	getTags(file: TFile): TagCache {
-		const cache = this.app.metadataCache.getFileCache(file);
-		const result: TagCache = {
-			frontmatterTags: [],
-			inlineTags: [],
-			allTags: []
-		};
-
-		if (!cache) {
-			this.logger.debug(`No cache found for file: ${file.path}`);
-			return result;
-		}
-
-		// Get frontmatter tags
-		if (cache.frontmatter?.tags) {
-			const fmTags = cache.frontmatter.tags;
-			if (Array.isArray(fmTags)) {
-				result.frontmatterTags = fmTags.map(t => t.toString());
-			} else if (typeof fmTags === 'string') {
-				result.frontmatterTags = fmTags.split(',').map(t => t.trim());
-			}
-		}
-
-		// Get inline tags
-		if (cache.tags?.length > 0) {
-			result.inlineTags = cache.tags.map(t => t.tag.substring(1)); // Remove # prefix
-		}
-
-		// Combine all tags and remove duplicates
-		result.allTags = [...new Set([...result.frontmatterTags, ...result.inlineTags])];
-
-		this.logger.debug('Found tags:', result);
-		return result;
-	}
-
 	onunload() {
-		// Clear tag cache
-		this.lastKnownTags.clear();
-		
 		// Log unload
 		this.logger.info('Wiki.js Publisher plugin unloaded');
-		
-		// No need to manually remove events or commands as they're handled by Plugin class
-		// No need to manually remove settings tab as it's handled by Plugin class
-		// No need to clear secure storage as it's handled by OS
 	}
 
-	// Helper method to clean up resources if needed during runtime
+	/**
+	 * Cleanup resources during runtime if needed
+	 */
 	async cleanup() {
-		this.lastKnownTags.clear();
-		await this.saveSettings();
+		try {
+			// Save any pending settings
+			await this.saveSettings();
+			
+			this.logger.debug('Cleanup completed');
+		} catch (error) {
+			this.logger.error('Error during cleanup:', error);
+		}
+	}
+
+	/**
+	 * Error handler with cleanup
+	 * @param error Error to handle
+	 * @param message Optional user-friendly message
+	 */
+	private async handleError(error: Error, message?: string) {
+		await this.cleanup();
+		this.logger.error(message || 'An error occurred:', error);
+		new Notice(message || `Error: ${error.message}`);
 	}
 }
 
@@ -993,7 +924,7 @@ class WikiJSPublisherSettingTab extends PluginSettingTab {
 		const {containerEl} = this;
 		containerEl.empty();
 
-		// Connection settings (no heading needed as these are general settings)
+		// Connection
 		new Setting(containerEl)
 			.setName('Wiki.js URL')
 			.setDesc('URL of your Wiki.js instance (without trailing slash)')
@@ -1007,7 +938,7 @@ class WikiJSPublisherSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName('API token')
-			.setDesc('API token from Wiki.js with write permissions (stored securely)')
+			.setDesc('API token from Wiki.js with write permissions')
 			.addText(text => {
 				text.inputEl.type = 'password';
 				text.setPlaceholder('Enter your API token')
@@ -1017,14 +948,14 @@ class WikiJSPublisherSettingTab extends PluginSettingTab {
 					});
 			});
 
-		// Publishing options
+		// Publishing
 		new Setting(containerEl).setName('Publishing').setHeading();
 
 		new Setting(containerEl)
 			.setName('Default tags')
-			.setDesc('Default tags to apply to all published pages (comma-separated)')
+			.setDesc('Default tags to apply to all published pages')
 			.addText(text => text
-				.setPlaceholder('obsidian, notes')
+				.setPlaceholder('tag1, tag2, tag3')
 				.setValue(this.plugin.settings.defaultTags.join(', '))
 				.onChange(async (value) => {
 					this.plugin.settings.defaultTags = value
@@ -1035,8 +966,8 @@ class WikiJSPublisherSettingTab extends PluginSettingTab {
 				}));
 
 		new Setting(containerEl)
-			.setName('Publish front matter key')
-			.setDesc('Front matter key that marks a note for publishing')
+			.setName('Front matter publish key')
+			.setDesc('Key that marks a note for publishing')
 			.addText(text => text
 				.setPlaceholder('wikijs_publish')
 				.setValue(this.plugin.settings.publishFrontMatterKey)
@@ -1046,8 +977,8 @@ class WikiJSPublisherSettingTab extends PluginSettingTab {
 				}));
 
 		new Setting(containerEl)
-			.setName('Path prefix key')
-			.setDesc('Front matter key used for specifying the Wiki.js path prefix')
+			.setName('Front matter path prefix key')
+			.setDesc('Key used for specifying the Wiki.js path prefix')
 			.addText(text => text
 				.setPlaceholder('wikijs_path_prefix')
 				.setValue(this.plugin.settings.pathPrefixKey)
@@ -1057,8 +988,8 @@ class WikiJSPublisherSettingTab extends PluginSettingTab {
 				}));
 
 		new Setting(containerEl)
-			.setName('Sync tags')
-			.setDesc('Sync Obsidian document tags to Wiki.js (in addition to default tags)')
+			.setName('Sync note tags')
+			.setDesc('Include document tags when publishing to Wiki.js')
 			.addToggle(toggle => toggle
 				.setValue(this.plugin.settings.syncTags)
 				.onChange(async (value) => {
@@ -1066,7 +997,7 @@ class WikiJSPublisherSettingTab extends PluginSettingTab {
 					await this.plugin.saveSettings();
 				}));
 
-		// Advanced options
+		// Advanced
 		new Setting(containerEl).setName('Advanced').setHeading();
 
 		new Setting(containerEl)
@@ -1090,5 +1021,6 @@ class WikiJSPublisherSettingTab extends PluginSettingTab {
 					this.plugin.logger.setDebugMode(value);
 					await this.plugin.saveSettings();
 				}));
+
 	}
 }
