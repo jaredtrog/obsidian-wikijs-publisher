@@ -1,0 +1,9 @@
+{
+	"id": "obsidian-wikijs-publisher",
+	"name": "Wiki.js Publisher",
+	"version": "1.0.0",
+	"minAppVersion": "0.15.0",
+	"description": "Publish Obsidian notes to Wiki.js based on front matter configuration",
+	"author": "Jared Trog",
+	"isDesktopOnly": true
+}
