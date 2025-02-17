@@ -59,7 +59,7 @@ interface TagCache {
 const DEFAULT_SETTINGS: WikiJSPublisherSettings = {
 	wikiJsUrl: '',
 	encryptedApiToken: null,
-	defaultTags: ['obsidian'],
+	defaultTags: [],
 	publishFrontMatterKey: 'wikijs_publish',
 	pathPrefixKey: 'wikijs_path_prefix',
 	caPath: '',
@@ -142,20 +142,16 @@ export default class WikiJSPublisher extends Plugin {
 
 		// Add command to publish current note
 		this.addCommand({
-			id: 'publish-to-wikijs',
-			name: 'Publish current note to Wiki.js',
-			callback: () => {
-				this.publishCurrentNote();
-			}
+			id: 'publish-current-note',
+			name: 'Publish current note',
+			callback: () => this.publishCurrentNote()
 		});
 
 		// Add command to publish all marked notes
 		this.addCommand({
-			id: 'publish-all-to-wikijs',
-			name: 'Publish all marked notes to Wiki.js',
-			callback: () => {
-				this.publishAllMarkedNotes();
-			}
+			id: 'publish-all-marked-notes',
+			name: 'Publish all marked notes',
+			callback: () => this.publishAllMarkedNotes()
 		});
 
 		// Add settings tab
@@ -353,13 +349,8 @@ export default class WikiJSPublisher extends Plugin {
 				new Notice('Cannot publish empty note. Please add some content first.');
 				return;
 			}
-
-			// Convert to tags if enabled
-			const additionalTags = this.settings.syncTags ? 
-				this.frontMatterToTags(frontMatter) : 
-				[];
 			
-			// Convert links (now async)
+			// Convert links
 			const content = await this.convertObsidianLinks(processedContent);
 			const tags = this.getPublishTags(file);
 			
@@ -385,6 +376,7 @@ export default class WikiJSPublisher extends Plugin {
 				new Notice('Successfully created new page on Wiki.js');
 			}
 		} catch (error) {
+			await this.cleanup();
 			this.logger.error('Publishing error:', error);
 			new Notice(`Failed to publish: ${error.message}`);
 		}
@@ -484,6 +476,7 @@ export default class WikiJSPublisher extends Plugin {
 				await new Promise(resolve => setTimeout(resolve, 500));
 				
 			} catch (error) {
+				await this.cleanup();
 				this.logger.error(`Error publishing ${filePath}:`, error);
 				new Notice(`Failed to publish ${filePath}: ${error.message}`);
 				errorCount++;
@@ -898,29 +891,6 @@ export default class WikiJSPublisher extends Plugin {
 		return processedContent;
 	}
 
-	/**
-	 * Converts front matter key-value pairs to tags
-	 * @param frontMatter Parsed front matter object
-	 * @returns Array of generated tags
-	 */
-	frontMatterToTags(frontMatter: Record<string, any>): string[] {
-		this.logger.debug('Converting front matter to tags...');
-		const tags: string[] = [];
-		
-		for (const key in frontMatter) {
-			const value = frontMatter[key];
-			// Skip certain keys we don't want as tags
-			if (['tags', this.settings.publishFrontMatterKey, 'path_prefix'].includes(key)) {
-				continue;
-			}
-			this.logger.debug(`Converting key: ${key}, value: ${value}`);
-			tags.push(`${key}: ${value}`);
-		}
-
-		this.logger.debug('Converted tags:', tags);
-		return tags;
-	}
-
 	async setApiToken(token: string) {
 		try {
 			if (!token) {
@@ -984,6 +954,24 @@ export default class WikiJSPublisher extends Plugin {
 		this.logger.debug('Found tags:', result);
 		return result;
 	}
+
+	onunload() {
+		// Clear tag cache
+		this.lastKnownTags.clear();
+		
+		// Log unload
+		this.logger.info('Wiki.js Publisher plugin unloaded');
+		
+		// No need to manually remove events or commands as they're handled by Plugin class
+		// No need to manually remove settings tab as it's handled by Plugin class
+		// No need to clear secure storage as it's handled by OS
+	}
+
+	// Helper method to clean up resources if needed during runtime
+	async cleanup() {
+		this.lastKnownTags.clear();
+		await this.saveSettings();
+	}
 }
 
 /**
@@ -1005,9 +993,7 @@ class WikiJSPublisherSettingTab extends PluginSettingTab {
 		const {containerEl} = this;
 		containerEl.empty();
 
-		containerEl.createEl('h2', {text: 'Wiki.js Publisher Settings'});
-
-		// Wiki.js URL Setting
+		// Connection settings (no heading needed as these are general settings)
 		new Setting(containerEl)
 			.setName('Wiki.js URL')
 			.setDesc('URL of your Wiki.js instance (without trailing slash)')
@@ -1015,14 +1001,12 @@ class WikiJSPublisherSettingTab extends PluginSettingTab {
 				.setPlaceholder('https://wiki.example.com')
 				.setValue(this.plugin.settings.wikiJsUrl)
 				.onChange(async (value) => {
-					// Remove trailing slash if present
 					this.plugin.settings.wikiJsUrl = value.replace(/\/$/, '');
 					await this.plugin.saveSettings();
 				}));
 
-		// API Token Setting with secure storage
 		new Setting(containerEl)
-			.setName('API Token')
+			.setName('API token')
 			.setDesc('API token from Wiki.js with write permissions (stored securely)')
 			.addText(text => {
 				text.inputEl.type = 'password';
@@ -1033,9 +1017,11 @@ class WikiJSPublisherSettingTab extends PluginSettingTab {
 					});
 			});
 
-		// Default Tags Setting
+		// Publishing options
+		new Setting(containerEl).setName('Publishing').setHeading();
+
 		new Setting(containerEl)
-			.setName('Default Tags')
+			.setName('Default tags')
 			.setDesc('Default tags to apply to all published pages (comma-separated)')
 			.addText(text => text
 				.setPlaceholder('obsidian, notes')
@@ -1048,9 +1034,8 @@ class WikiJSPublisherSettingTab extends PluginSettingTab {
 					await this.plugin.saveSettings();
 				}));
 
-		// Publish Front Matter Key Setting
 		new Setting(containerEl)
-			.setName('Publish Front Matter Key')
+			.setName('Publish front matter key')
 			.setDesc('Front matter key that marks a note for publishing')
 			.addText(text => text
 				.setPlaceholder('wikijs_publish')
@@ -1060,9 +1045,8 @@ class WikiJSPublisherSettingTab extends PluginSettingTab {
 					await this.plugin.saveSettings();
 				}));
 
-		// Path Prefix Key Setting
 		new Setting(containerEl)
-			.setName('Path Prefix Front Matter Key')
+			.setName('Path prefix key')
 			.setDesc('Front matter key used for specifying the Wiki.js path prefix')
 			.addText(text => text
 				.setPlaceholder('wikijs_path_prefix')
@@ -1072,9 +1056,21 @@ class WikiJSPublisherSettingTab extends PluginSettingTab {
 					await this.plugin.saveSettings();
 				}));
 
-		// CA Certificate Path Setting
 		new Setting(containerEl)
-			.setName('CA Certificate Path')
+			.setName('Sync tags')
+			.setDesc('Sync Obsidian document tags to Wiki.js (in addition to default tags)')
+			.addToggle(toggle => toggle
+				.setValue(this.plugin.settings.syncTags)
+				.onChange(async (value) => {
+					this.plugin.settings.syncTags = value;
+					await this.plugin.saveSettings();
+				}));
+
+		// Advanced options
+		new Setting(containerEl).setName('Advanced').setHeading();
+
+		new Setting(containerEl)
+			.setName('CA certificate path')
 			.setDesc('Path to custom CA certificate for SSL verification (optional)')
 			.addText(text => text
 				.setPlaceholder('/path/to/ca.crt')
@@ -1084,20 +1080,8 @@ class WikiJSPublisherSettingTab extends PluginSettingTab {
 					await this.plugin.saveSettings();
 				}));
 
-		// Sync Tags Setting
 		new Setting(containerEl)
-			.setName('Sync Tags')
-			.setDesc('Sync Obsidian document tags to Wiki.js (in addition to default tags)')
-			.addToggle(toggle => toggle
-				.setValue(this.plugin.settings.syncTags)
-				.onChange(async (value) => {
-					this.plugin.settings.syncTags = value;
-					await this.plugin.saveSettings();
-				}));
-
-		// Debug Mode Setting
-		new Setting(containerEl)
-			.setName('Debug Mode')
+			.setName('Debug mode')
 			.setDesc('Enable detailed logging for troubleshooting')
 			.addToggle(toggle => toggle
 				.setValue(this.plugin.settings.debugMode)
@@ -1106,20 +1090,5 @@ class WikiJSPublisherSettingTab extends PluginSettingTab {
 					this.plugin.logger.setDebugMode(value);
 					await this.plugin.saveSettings();
 				}));
-
-		// Add help text
-		containerEl.createEl('h3', {text: 'Usage Instructions'});
-		
-		const instructions = containerEl.createEl('div', {cls: 'setting-item-description'});
-		instructions.innerHTML = `
-			<p>To publish a note to Wiki.js, add the following to your note's front matter:</p>
-			<pre>${this.plugin.settings.publishFrontMatterKey}: true</pre>
-			<p>You can also add a path prefix to organize your pages:</p>
-			<pre>${this.plugin.settings.pathPrefixKey}: folder/subfolder</pre>
-			<p>Tags can be added using the standard front matter tags field:</p>
-			<pre>tags: [tag1, tag2, tag3]</pre>
-			<p>or using the \`#\` syntax in the note body:</p>
-			<pre>#tag1 #tag2 #tag3</pre>
-		`;
 	}
 }
