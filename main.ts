@@ -27,6 +27,8 @@ interface WikiJSPublisherSettings {
 	debugMode: boolean;
 	/** Front matter key used for specifying the Wiki.js path prefix */
 	pathPrefixKey: string;
+	/** Whether to use Obsidian folder structure */
+	useObsidianPath: boolean;
 }
 
 /**
@@ -52,7 +54,8 @@ const DEFAULT_SETTINGS: WikiJSPublisherSettings = {
 	pathPrefixKey: 'wikijs_path_prefix',
 	caPath: '',
 	syncTags: false,
-	debugMode: false
+	debugMode: false,
+	useObsidianPath: false
 }
 
 /**
@@ -282,6 +285,41 @@ export default class WikiJSPublisher extends Plugin {
 	}
 
 	/**
+	 * Gets the Wiki.js path for a file
+	 * @param file The file to get the path for
+	 * @param frontMatter The file's front matter
+	 * @returns The path to use in Wiki.js
+	 */
+	private getWikiPath(file: TFile, frontMatter: Record<string, any>): string {
+		// Front matter prefix overrides everything if present
+		const frontMatterPrefix = frontMatter[this.settings.pathPrefixKey];
+		if (frontMatterPrefix) {
+			const normalizedPrefix = frontMatterPrefix.replace(/^\/|\/$/g, '');
+			return normalizedPrefix 
+				? `${normalizedPrefix}/${this.slugify(file.basename)}`
+				: this.slugify(file.basename);
+		}
+
+		// Use Obsidian path if enabled
+		if (this.settings.useObsidianPath) {
+			// Get the file's path without the extension
+			const pathWithoutExtension = file.path.slice(0, -file.extension.length - 1);
+			
+			// Convert the path to slugified format
+			const slugifiedPath = pathWithoutExtension
+				.split('/')
+				.map(segment => this.slugify(segment))
+				.join('/');
+
+			this.logger.debug(`Using Obsidian path: ${slugifiedPath}`);
+			return slugifiedPath;
+		}
+
+		// Default to just the slugified filename
+		return this.slugify(file.basename);
+	}
+
+	/**
 	 * Publishes the currently active note to Wiki.js
 	 */
 	async publishCurrentNote(): Promise<void> {
@@ -320,12 +358,8 @@ export default class WikiJSPublisher extends Plugin {
 			const content = await this.convertObsidianLinks(processedContent);
 			const tags = this.getPublishTags(file);
 			
-			const pathPrefix = frontMatter[this.settings.pathPrefixKey] ? 
-				frontMatter[this.settings.pathPrefixKey].replace(/^\/|\/$/g, '') + '/' : 
-				'';
-			
-			const slugifiedPath = pathPrefix + this.slugify(file.basename);
-			this.logger.debug('Using path with prefix:', slugifiedPath);
+			const slugifiedPath = this.getWikiPath(file, frontMatter);
+			this.logger.debug('Using path:', slugifiedPath);
 			
 			const {exists, id} = await this.checkPageExists(slugifiedPath);
 			
@@ -997,6 +1031,16 @@ class WikiJSPublisherSettingTab extends PluginSettingTab {
 					await this.plugin.saveSettings();
 				}));
 
+		new Setting(containerEl)
+		.setName('Use Obsidian folder structure')
+		.setDesc('Use the file location in Obsidian as the path in Wiki.js')
+		.addToggle(toggle => toggle
+			.setValue(this.plugin.settings.useObsidianPath)
+			.onChange(async (value) => {
+				this.plugin.settings.useObsidianPath = value;
+				await this.plugin.saveSettings();
+			}));
+
 		// Advanced
 		new Setting(containerEl).setName('Advanced').setHeading();
 
@@ -1021,6 +1065,5 @@ class WikiJSPublisherSettingTab extends PluginSettingTab {
 					this.plugin.logger.setDebugMode(value);
 					await this.plugin.saveSettings();
 				}));
-
 	}
 }
